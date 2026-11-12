@@ -1,0 +1,83 @@
+name: Build and publish Discord Cloner
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish, e.g. 9.1.0'
+        required: true
+        type: string
+      prerelease:
+        description: 'Publish as prerelease'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate version and required source files
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, re
+          v = os.environ["RELEASE_VERSION"]
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", v):
+              raise SystemExit("Version must be X.Y.Z")
+          required = ["app.py","updater.py","START.bat","requirements.txt","VERSION","README_TH.md","PUBLISH_TH.md"]
+          missing = [p for p in required if not pathlib.Path(p).is_file()]
+          if missing:
+              raise SystemExit("Missing source files: " + ", ".join(missing))
+          actual = pathlib.Path("VERSION").read_text(encoding="utf-8").strip()
+          if actual != v:
+              raise SystemExit(f"VERSION file says {actual}, expected {v}")
+          PY
+      - name: Check Python syntax
+        run: python -m py_compile app.py updater.py
+      - name: Build update ZIP and SHA-256
+        run: |
+          python - <<'PY'
+          import hashlib, pathlib, zipfile
+          files = ["app.py","updater.py","START.bat","requirements.txt","VERSION","README_TH.md","PUBLISH_TH.md"]
+          name = "Discord_Cloner_V9_TH_Windows.zip"
+          with zipfile.ZipFile(name, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+              for f in files:
+                  z.write(f, arcname=f)
+          digest = hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()
+          pathlib.Path(name + ".sha256").write_text(f"{digest}  {name}\n", encoding="utf-8")
+          with zipfile.ZipFile(name) as z:
+              assert set(files).issubset(z.namelist())
+          print("SHA-256:", digest)
+          PY
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          IS_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          tag="v${RELEASE_VERSION}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; refusing to overwrite."
+            exit 1
+          fi
+          args=()
+          if [ "$IS_PRERELEASE" = "true" ]; then args+=(--prerelease); fi
+          gh release create "$tag" \
+            Discord_Cloner_V9_TH_Windows.zip \
+            Discord_Cloner_V9_TH_Windows.zip.sha256 \
+            --target "$GITHUB_SHA" \
+            --title "Discord Cloner $tag" \
+            --generate-notes \
+            "${args[@]}"
